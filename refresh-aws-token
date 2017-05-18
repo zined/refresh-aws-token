@@ -1,0 +1,150 @@
+#!/usr/bin/env python2
+
+import os
+import sys
+import argparse
+import ConfigParser
+import requests
+import base64
+import xml.etree.cElementTree
+import boto.sts
+
+try:
+    import kerberos
+except ImportError:
+    import winkerberos as kerberos
+
+arg_parser = argparse.ArgumentParser(
+        description='refresh aws credentials for a given profile via adfs/saml/sts.')
+arg_parser.add_argument('--profile', required=True,
+        help='which aws profile to refresh the keys for')
+args = arg_parser.parse_args()
+
+user_home = os.path.expanduser("~")
+aws_config_file = "%s/.aws/config" % user_home
+aws_credentials_file = "%s/.aws/credentials" % user_home
+
+aws_config = ConfigParser.RawConfigParser()
+aws_config.read(aws_config_file)
+
+aws_profile = args.profile
+aws_profile_section = 'profile %s' % aws_profile
+
+if not aws_config.has_section(aws_profile_section):
+    print "profile '%s' not found." % ( aws_profile )
+    sys.exit(1)
+
+saml_provider, saml_provider_url, saml_provider_krb_service = ( None, None, None )
+saml_provider_relying_party, saml_role = ( None, None )
+
+for item in aws_config.items(aws_profile_section):
+    key, value = item[0], item[1]
+    if key == 'saml_provider':
+        if value == 'ADFS-HTTP':
+            saml_provider = value
+    elif key == 'saml_provider_url':
+        saml_provider_url = value
+    elif key == 'saml_provider_krb_service':
+        saml_provider_krb_service = value
+    elif key == 'saml_role':
+        saml_role = value
+    elif key == 'saml_provider_relying_party':
+        saml_provider_relying_party = value
+
+if saml_provider == None:
+    print "please configure a 'saml_provider'."
+    sys.exit(1)
+
+if saml_provider_url == None:
+    print "please configure a 'saml_provider_url'."
+    sys.exit(1)
+
+if saml_provider_krb_service == None:
+    print "please configure a 'saml_provider_krb_service'."
+    sys.exit(1)
+
+if saml_provider_relying_party == None:
+    print "please configure a 'saml_provider_relying_party'."
+    sys.exit(1)
+
+if saml_role == None:
+    print "please configure a 'saml_role'."
+    sys.exit(1)
+
+krb_service = saml_provider_krb_service
+_, krb_context = kerberos.authGSSClientInit(krb_service)
+kerberos.authGSSClientStep(krb_context, '')
+krb_token = kerberos.authGSSClientResponse(krb_context)
+
+data = {
+        'SignInOtherSite': 'SignInOtherSite',
+        'RelyingParty': saml_provider_relying_party,
+        'SignInSubmit': 'Sign+in',
+        'SingleSignOut': 'SingleSignOut'}
+
+headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 Safari/537.36',
+        'Authorization': 'Negotiate ' + krb_token
+        }
+
+url = saml_provider_url
+
+response = requests.post(url, data=data, headers=headers)
+
+parser = xml.etree.cElementTree.XMLParser(
+        target=xml.etree.cElementTree.TreeBuilder(),
+        encoding='utf-8')
+parser.feed(response.text)
+root = parser.close()
+
+saml_assertion_b64 = root.find('.//input[@name="SAMLResponse"]').get('value')
+saml_assertion_xml = base64.b64decode(saml_assertion_b64)
+
+del parser
+del root
+
+parser = xml.etree.cElementTree.XMLParser(
+        target=xml.etree.cElementTree.TreeBuilder(),
+        encoding='utf-8')
+parser.feed(saml_assertion_xml)
+root = parser.close()
+
+saml_assertion_attributes = root.findall('.//{urn:oasis:names:tc:SAML:2.0:assertion}Assertion/{urn:oasis:names:tc:SAML:2.0:assertion}AttributeStatement/{urn:oasis:names:tc:SAML:2.0:assertion}Attribute')
+
+role_session_name = ''
+roles = []
+
+for saml_assertion_attribute in saml_assertion_attributes:
+    attribute_name = saml_assertion_attribute.get('Name')
+    if attribute_name == 'https://aws.amazon.com/SAML/Attributes/RoleSessionName':
+        role_session_name = saml_assertion_attribute.getchildren()[0].text
+    elif attribute_name == 'https://aws.amazon.com/SAML/Attributes/Role':
+        for saml_assertion_attribute_value in saml_assertion_attribute.getchildren():
+            roles.append(saml_assertion_attribute_value.text)
+
+if not saml_role in roles:
+    print "role '%s' not assumable." % saml_role
+    print ""
+    print "available roles for '%s':" % role_session_name
+    for role in roles:
+        print " - '%s'" % role
+    sys.exit(0)
+
+saml_idp, saml_role = saml_role.split(',')
+
+sts_connection = boto.sts.STSConnection(anon=True)
+sts_token = sts_connection.assume_role_with_saml(saml_role, saml_idp, saml_assertion_b64)
+
+aws_credentials = ConfigParser.RawConfigParser()
+aws_credentials.read(aws_credentials_file)
+if not aws_credentials.has_section(aws_profile):
+    aws_credentials.add_section(aws_profile)
+
+aws_credentials.set(aws_profile, 'aws_access_key_id', sts_token.credentials.access_key)
+aws_credentials.set(aws_profile, 'aws_secret_access_key', sts_token.credentials.secret_key)
+aws_credentials.set(aws_profile, 'aws_session_token', sts_token.credentials.session_token)
+
+with open(aws_credentials_file, 'wb') as credentials_file:
+    aws_credentials.write(credentials_file)
+
+sys.exit(0)
