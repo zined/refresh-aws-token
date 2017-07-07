@@ -18,6 +18,13 @@ arg_parser = argparse.ArgumentParser(
         description='refresh aws credentials for a given profile via adfs/saml/sts.')
 arg_parser.add_argument('--profile', required=True,
         help='which aws profile to refresh the keys for')
+arg_parser.add_argument('--saml', dest='saml', action='store_true',
+        help='fetches the saml token and prints it')
+arg_parser.add_argument('--debug', dest='debug', action='store_true',
+        help='prints debug information')
+arg_parser.set_defaults(saml=False)
+arg_parser.set_defaults(debug=False)
+
 args = arg_parser.parse_args()
 
 user_home = os.path.expanduser("~")
@@ -89,6 +96,11 @@ headers = {
 
 url = saml_provider_url
 
+if args.debug:
+    print "sending to ADFS (%s):" % url
+    print "headers = %s" % headers
+    print "data = %s" % data
+
 response = requests.post(url, data=data, headers=headers)
 
 parser = xml.etree.cElementTree.XMLParser(
@@ -99,6 +111,10 @@ root = parser.close()
 
 saml_assertion_b64 = root.find('.//input[@name="SAMLResponse"]').get('value')
 saml_assertion_xml = base64.b64decode(saml_assertion_b64)
+
+if args.saml:
+    print saml_assertion_xml
+    sys.exit(0)
 
 del parser
 del root
