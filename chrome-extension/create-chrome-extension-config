@@ -1,0 +1,33 @@
+#!/usr/bin/env python2.7
+
+import os
+import ConfigParser
+import json
+
+user_home = os.path.expanduser("~")
+aws_config_file = "%s/.aws/config" % user_home
+
+aws_config = ConfigParser.RawConfigParser()
+aws_config.read(aws_config_file)
+
+extension_configs = []
+
+for section in aws_config.sections():
+    saml_role, saml_provider_url, saml_provider_relying_party = None, None, None
+    for key, value in aws_config.items(section):
+        if key == 'saml_role':
+            saml_role = value
+        elif key == 'saml_provider_url':
+            saml_provider_url = value
+        elif key == 'saml_provider_relying_party':
+            saml_provider_relying_party = value
+    if saml_role is None or saml_provider_url is None or saml_provider_relying_party is None:
+        continue
+    extension_configs.append({
+        'name': section.split(' ')[1],
+        'role': saml_role,
+        'provider_url': saml_provider_url,
+        'provider_relying_party': saml_provider_relying_party,
+        })
+
+print 'var awsConfig = %s;' % ( json.dumps(extension_configs, indent=4) )
